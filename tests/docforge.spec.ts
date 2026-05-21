@@ -160,6 +160,36 @@ test.describe('Suite 2: Connection Logic & Fallback Mocking', () => {
     await expect(SEL.headerBadge(page)).toHaveClass(/badge-success/);
     await expect(SEL.headerBadge(page)).toContainText(/Local Only/i);
   });
+
+  test('C: Anthropic Claude connects and badge shows "Connected to Anthropic Claude"', async ({ page }) => {
+    await page.route('**/api/anthropic/**/models', (route) => fulfillModels(route, 200));
+
+    await SEL.connectionToggle(page).click();
+    await SEL.providerSelect(page).selectOption('Anthropic Claude');
+
+    await expect(SEL.baseUrlInput(page)).toHaveValue(/anthropic\.com/);
+
+    await SEL.apiKeyInput(page).fill('sk-ant-mock-key');
+    await SEL.connectBtn(page).click();
+
+    await expect(SEL.headerBadge(page)).toHaveClass(/badge-success/);
+    await expect(SEL.headerBadge(page)).toContainText(/Anthropic Claude/i);
+  });
+
+  test('D: Anthropic Claude still connects when fallback fails', async ({ page }) => {
+    await page.route('**/api/anthropic/**/models', (route) => fulfillModels(route, 200));
+    await page.route('**://localhost:1234/**/models', (route) => fulfillModels(route, 500));
+
+    await SEL.connectionToggle(page).click();
+    await SEL.providerSelect(page).selectOption('Anthropic Claude');
+
+    await SEL.apiKeyInput(page).fill('sk-ant-mock-key');
+    await SEL.fallbackUrlInput(page).fill('http://localhost:1234/v1');
+    await SEL.connectBtn(page).click();
+
+    await expect(SEL.headerBadge(page)).toHaveClass(/badge-success/);
+    await expect(SEL.headerBadge(page)).toContainText(/Connected to Anthropic Claude/i);
+  });
 });
 
 /* ============================================================

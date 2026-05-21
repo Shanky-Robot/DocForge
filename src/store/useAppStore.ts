@@ -27,6 +27,8 @@ interface AppState {
   templateFile: File | null;
   processingMode: 'bulk' | 'semantic';
   creatorName: string;
+  webSearchEnabled: boolean;
+  mcpServerUrl: string;
   setProjectName: (name: string) => void;
   setFiles: (files: File[]) => void;
   setOutputType: (type: string) => void;
@@ -34,6 +36,8 @@ interface AppState {
   setTemplateFile: (file: File | null) => void;
   setProcessingMode: (mode: 'bulk' | 'semantic') => void;
   setCreatorName: (name: string) => void;
+  setWebSearchEnabled: (enabled: boolean) => void;
+  setMcpServerUrl: (url: string) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -60,6 +64,8 @@ export const useAppStore = create<AppState>((set) => ({
   templateFile: null,
   processingMode: 'semantic',
   creatorName: 'John Doe',
+  webSearchEnabled: false,
+  mcpServerUrl: 'http://localhost:3000',
   setProjectName: (name) => set({ projectName: name }),
   setFiles: (files) => set({ files }),
   setOutputType: (type) => set({ outputType: type }),
@@ -67,4 +73,6 @@ export const useAppStore = create<AppState>((set) => ({
   setTemplateFile: (file) => set({ templateFile: file }),
   setProcessingMode: (mode) => set({ processingMode: mode }),
   setCreatorName: (name) => set({ creatorName: name }),
+  setWebSearchEnabled: (enabled) => set({ webSearchEnabled: enabled }),
+  setMcpServerUrl: (url) => set({ mcpServerUrl: url }),
 }));

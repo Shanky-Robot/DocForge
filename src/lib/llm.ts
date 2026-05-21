@@ -98,12 +98,25 @@ function getProviderNameFromUrl(url: string): string {
   return 'External API';
 }
 
+function isAnthropicUrl(url: string): boolean {
+  const lowerUrl = url.toLowerCase();
+  return lowerUrl.includes('anthropic') || lowerUrl.includes('claude');
+}
+
+function getAnthropicProxyBase(): string {
+  return '/api/anthropic/v1';
+}
+
 export function formatDetailedError(error: any, providerName: string): Error {
   const status = error.status;
   let message = `${providerName} API Error: `;
   let fix = 'Please check your settings and try again.';
+  const errorText = `${error.message || ''} ${(error.details?.message || '')}`.toLowerCase();
 
-  if (status === 401 || status === 403) {
+  if (providerName === 'Anthropic Claude' && errorText.includes('credit balance is too low')) {
+    message += 'Insufficient Anthropic Credits.';
+    fix = 'Please add credits or upgrade your Anthropic plan, then try again.';
+  } else if (status === 401 || status === 403) {
     message += 'Invalid or Missing API Key.';
     fix = 'Please ensure you have entered a valid API Key for this provider.';
   } else if (status === 429) {
@@ -112,6 +125,9 @@ export function formatDetailedError(error: any, providerName: string): Error {
   } else if (status >= 500) {
     message += 'Provider Server Error.';
     fix = 'The AI provider is currently experiencing issues. Try again later.';
+  } else if (status === 400 && errorText.includes('credit balance is too low')) {
+    message += 'Insufficient Anthropic Credits.';
+    fix = 'Please add credits or upgrade your Anthropic plan, then try again.';
   } else if (error.message && (error.message.includes('fetch') || error.message.includes('Failed to fetch') || error.message.includes('network'))) {
     message += 'Network Connection Failed.';
     fix = `Make sure your internet connection is active, or if using a local server, ensure it is running at the configured URL.`;
@@ -130,6 +146,7 @@ export async function checkConnection(config: LLMConfig): Promise<boolean> {
     if (!targetUrl) return false;
 
     const { base, extractedKey, isNativeGemini } = normalizeBaseUrl(targetUrl, config.apiKey);
+    const isAnthropic = isAnthropicUrl(base);
 
     let url = `${base}/models`;
     const finalKey = config.apiKey || extractedKey;
@@ -137,13 +154,21 @@ export async function checkConnection(config: LLMConfig): Promise<boolean> {
     if (isNativeGemini) {
       // For native Gemini, test the models endpoint
       url = `https://generativelanguage.googleapis.com/v1beta/models?key=${finalKey}`;
+    } else if (isAnthropic) {
+      url = `${getAnthropicProxyBase()}/models`;
     }
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
     if (finalKey && !isNativeGemini) {
-      headers['Authorization'] = `Bearer ${finalKey}`;
+      if (isAnthropic) {
+        headers['x-api-key'] = finalKey;
+        headers['anthropic-version'] = '2023-06-01';
+        headers['anthropic-dangerous-direct-browser-access'] = 'true';
+      } else {
+        headers['Authorization'] = `Bearer ${finalKey}`;
+      }
     }
 
     // Using an AbortController for a fast timeout on connection test
@@ -178,6 +203,7 @@ export async function generateCompletion(
   const callApi = async (url: string, key?: string, isExternal?: boolean) => {
     const { base, extractedKey, isNativeGemini } = normalizeBaseUrl(url, key);
     const finalKey = key || extractedKey;
+    const isAnthropic = isAnthropicUrl(base);
 
     if (isNativeGemini) {
       const endpoint = `${base}?key=${finalKey}`;
@@ -246,6 +272,86 @@ export async function generateCompletion(
       return data.candidates[0].content.parts[0].text;
     }
 
+    if (isAnthropic) {
+      const endpoint = `${getAnthropicProxyBase()}/messages`;
+      const systemMessage = messages.find(m => m.role === 'system')?.content;
+      const anthropicMessages = messages
+        .filter(m => m.role !== 'system')
+        .map(m => {
+          if (typeof m.content === 'string') {
+            return {
+              role: m.role,
+              content: [{ type: 'text', text: m.content }]
+            };
+          }
+
+          return {
+            role: m.role,
+            // @ts-ignore
+            content: (m.content.flatMap(part => {
+              if (part.type === 'text') {
+                return [{ type: 'text', text: part.text ?? '' }];
+              }
+
+              if (part.type === 'image_url' && part.image_url?.url) {
+                const [meta, data] = part.image_url.url.split(',');
+                const mimeType = meta.split(';')[0].split(':')[1];
+                return [{
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: mimeType,
+                    data
+                  }
+                }];
+              }
+
+              return [];
+            }) as any[])
+          };
+        });
+
+      const payload: any = {
+        model: 'claude-sonnet-4-5-20250929',
+        messages: anthropicMessages,
+        max_tokens: 2000,
+        temperature
+      };
+
+      if (systemMessage) {
+        payload.system = typeof systemMessage === 'string'
+          ? systemMessage
+          : systemMessage.map(part => part.text ?? '').join('\n');
+      }
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      };
+      if (finalKey) {
+        headers['x-api-key'] = finalKey;
+      }
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+        signal
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => '');
+        const err = new Error(`LLM API error: ${response.status} ${response.statusText}${errorBody ? ` ${errorBody}` : ''}`);
+        (err as any).status = response.status;
+        (err as any).details = { body: errorBody };
+        throw err;
+      }
+
+      const data = await response.json();
+      return data.content?.map((part: any) => part.text || '').join('') ?? '';
+    }
+
     // Standard OpenAI Compatible Flow
     let endpoint = base;
     if (!endpoint.endsWith('/chat/completions')) {
@@ -262,6 +368,7 @@ export async function generateCompletion(
     let model = 'local-model';
     if (isExternal) {
       if (endpoint.includes('gemini') || endpoint.includes('generativelanguage')) model = 'gemini-flash-latest';
+      else if (endpoint.includes('anthropic') || endpoint.includes('claude')) model = 'claude-sonnet-4-5-20250929';
       else if (endpoint.includes('openai')) model = 'gpt-3.5-turbo';
       else if (endpoint.includes('groq')) model = 'llama3-8b-8192';
       else if (endpoint.includes('perplexity')) model = 'sonar-small-chat';

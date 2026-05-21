@@ -1,6 +1,6 @@
 import { generateCompletion, type LLMConfig } from './llm';
 import { chunkText } from './rag';
-import pptxgen from 'pptxgenjs';
+
 import DOMPurify from 'dompurify';
 
 function safeSanitize(input: string): string {
@@ -38,9 +38,11 @@ export interface PreProcessOptions {
   llmConfig: LLMConfig;
   onProgress: ProcessCallback;
   signal?: AbortSignal;
+  webSearchEnabled?: boolean;
+  mcpServerUrl?: string;
 }
 
-export async function runPreProcessing({ files, outputType, llmConfig, onProgress, signal }: PreProcessOptions): Promise<string> {
+export async function runPreProcessing({ files, outputType, llmConfig, onProgress, signal, webSearchEnabled, mcpServerUrl }: PreProcessOptions): Promise<string> {
   onProgress(10, 'Stage 1: AI Pre-Processing files...');
   let compiledContext = '';
 
@@ -75,7 +77,7 @@ export async function runPreProcessing({ files, outputType, llmConfig, onProgres
           who requested the change, impact on scope/budget/timeline,
           affected requirement IDs, and rollback considerations.
           Extract each change as: "Original: [X]. Proposed: [Y]. Reason: [Z]."`,
-      PRESENTATION: `Focus on: executive problem statement, value proposition, technical solution architecture, implementation timeline, financial/value realization metrics, and slide visual presentation concepts.`
+      PRESENTATION: `Focus on: executive problem statement, value proposition, technical solution architecture, implementation timeline, financial/value realization metrics, and slide visual presentation concepts. Extract any data relationships that can be visualized as charts or graphs.`
     };
 
     const focusInstruction = extractionFocus[outputType] || extractionFocus.BRD;
@@ -92,7 +94,7 @@ export async function runPreProcessing({ files, outputType, llmConfig, onProgres
       - Do NOT write a requirements document — only extract raw notes.
       - Preserve all numbers, dates, names, and metrics exactly as found.
       - If a piece of information is ambiguous, note it as:
-        [AMBIGUOUS: {what is unclear}]
+        [CLARIFICATION NEEDED: {what is unclear}]
 
       SOURCE DATA:
       ${rawText}`;
@@ -150,6 +152,52 @@ export async function runPreProcessing({ files, outputType, llmConfig, onProgres
         fileNotes += `### Part ${j + 1}\n\n${aiNotes}\n\n`;
       }
       compiledContext += `## Deep Analysis: ${file.name}\n\n${fileNotes}\n\n`;
+    }
+  }
+  
+  if (webSearchEnabled && mcpServerUrl) {
+    onProgress(30, 'Deep Web Research: Evaluating context for missing data...');
+    const gaps: string[] = [];
+    
+    // Check for explicit markers
+    const clarificationRegex = /\[CLARIFICATION NEEDED:\s*(.*?)\]/gi;
+    let match;
+    while ((match = clarificationRegex.exec(compiledContext)) !== null) {
+      if (match[1].trim() && !gaps.includes(match[1].trim())) {
+        gaps.push(match[1].trim());
+      }
+    }
+    const ambiguousRegex = /\[AMBIGUOUS:\s*(.*?)\]/gi;
+    while ((match = ambiguousRegex.exec(compiledContext)) !== null) {
+      if (match[1].trim() && !gaps.includes(match[1].trim())) {
+        gaps.push(match[1].trim());
+      }
+    }
+    
+    // Check for phrases
+    const missingRefRegex = /missing market reference|missing financial data/gi;
+    if (missingRefRegex.test(compiledContext)) {
+      gaps.push("market references and financial data");
+    }
+
+    if (gaps.length > 0) {
+      onProgress(32, `Deep Web Research: Found ${gaps.length} gaps, fetching real-time context...`);
+      const { executeMcpSearch } = await import('./mcpSearch');
+      let researchContext = '## Real-Time Deep Web Research Results\n\n';
+      
+      for (let k = 0; k < gaps.length; k++) {
+        if (signal?.aborted) {
+          const err = new Error('AbortError');
+          err.name = 'AbortError';
+          throw err;
+        }
+        onProgress(32 + Math.floor(((k + 1) / gaps.length) * 5), `Deep Web Research: Querying "${gaps[k].substring(0, 30)}..."`);
+        const result = await executeMcpSearch(gaps[k], mcpServerUrl);
+        if (result && result.trim().length > 0) {
+          researchContext += `### Research for: "${gaps[k]}"\n${result}\n\n`;
+        }
+      }
+      compiledContext += researchContext;
     }
   }
   
@@ -247,7 +295,15 @@ DOCUMENT-TYPE-SPECIFIC LANGUAGE RULES:
   priority tiers. Avoid "shall" language in PRD sections.
 - CRD: Every statement must be change-delta focused — describe the
   difference between current state and proposed state. Be precise,
-  factual, and impact-focused. Justify every change with source evidence.`;
+  factual, and impact-focused. Justify every change with source evidence.
+- PRESENTATION: Generate a 7-10 slide pitch deck for a solutions-provider partnership. Output must enforce a strict layout structure. Each slide must be wrapped explicitly inside "Slide X: [Title]" and contain:
+  - [THEME: DEFAULT_LIGHT | ENTERPRISE_DARK]: Select background styles matching the active template choice.
+  - [LAYOUT: TITLE_SLIDE | SPLIT_TWO_COLUMN | METRIC_HIGHLIGHT | TIMELINE_FLOW | HERO_IMAGE]: Dictate strict structural layout boundaries.
+  - [CONTENT]: Clean, highly scannable bullet points using concise executive language and benefit-driven statements. ABSOLUTELY NO MARKDOWN (no **, no ##, no code fences, no backticks). Do NOT output labels like "Title:", "Content:", or "Bullet points:" inside this block. Provide 3-4 points max.
+  - [NATIVE_CHART: TYPE, DATA_JSON]: For data-heavy sections, emit strictly valid, unescaped JSON datasets mapping labels to numbers (e.g., [NATIVE_CHART: bar, { "labels": ["A", "B"], "datasets": [100, 35] }]). DO NOT USE CODE FENCES. If no chart is needed, omit this block.
+  - [VISUAL_PROMPT]: An explicit, descriptive prompt optimized for AI image generators depicting professional corporate infographics or metaphors.
+  - [SPEAKER_NOTES]: Internal speaker commentary and talking points.
+  Ensure deck flow: 1. Title/Positioning, 2. Problem Statement, 3. Value Proposition, 4. Solution Architecture, 5. Implementation Roadmap, 6. Business Value/ROI, 7. Partnership Model, 8. Next Steps/CTA.`;
 
     // ---------------------------------------------------------
     // Stage 2: Template Parsing
@@ -259,46 +315,60 @@ DOCUMENT-TYPE-SPECIFIC LANGUAGE RULES:
       templateText = await executeWorker('EXTRACT_TEXT', { file: templateFile });
     } else if (baseTemplate === 'enterprise' && outputType === 'PRESENTATION') {
       templateText = `Slide 1: Title Slide
+[THEME: ENTERPRISE_DARK]
 [LAYOUT: TITLE_SLIDE]
+[CONTENT]:
 - Title: \${projectName}
 - Subtitle: Executive Pitch Deck
-- Visual: [High-fidelity description for AI image generation of a professional business cover]
+[VISUAL_PROMPT]: High-fidelity description for AI image generation of a professional business cover
 ---
 Slide 2: Executive Problem Statement
-[LAYOUT: TWO_COLUMN_SPLIT]
+[THEME: ENTERPRISE_DARK]
+[LAYOUT: SPLIT_TWO_COLUMN]
+[CONTENT]:
 - Title: The Core Challenge
 - Bullet points:
-- Visual/Chart: [JSON dataset or description for market pain points]
+[NATIVE_CHART: bar, { "labels": ["Current", "Expected"], "datasets": [50, 100] }]
 ---
 Slide 3: Value Proposition
+[THEME: ENTERPRISE_DARK]
 [LAYOUT: STANDARD_CONTENT]
+[CONTENT]:
 - Title: Our Solution
 - Bullet points:
-- Visual/Chart: [Iconography description for key value drivers]
+[VISUAL_PROMPT]: Iconography description for key value drivers
 ---
 Slide 4: Technical Solution Architecture
-[LAYOUT: TWO_COLUMN_SPLIT]
+[THEME: ENTERPRISE_DARK]
+[LAYOUT: SPLIT_TWO_COLUMN]
+[CONTENT]:
 - Title: How It Works
 - Bullet points:
-- Visual/Chart: [High-level architectural diagram description]
+[VISUAL_PROMPT]: High-level architectural diagram description
 ---
 Slide 5: Implementation Timeline
-[LAYOUT: FULL_WIDTH_VISUAL]
+[THEME: ENTERPRISE_DARK]
+[LAYOUT: TIMELINE_FLOW]
+[CONTENT]:
 - Title: Roadmap to Success
 - Bullet points:
-- Visual/Chart: [JSON dataset or table description for project milestones]
+[NATIVE_CHART: bar, { "labels": ["Phase 1", "Phase 2", "Phase 3"], "datasets": [30, 60, 90] }]
 ---
 Slide 6: Financial & Value Realization
-[LAYOUT: TWO_COLUMN_SPLIT]
+[THEME: ENTERPRISE_DARK]
+[LAYOUT: SPLIT_TWO_COLUMN]
+[CONTENT]:
 - Title: ROI & Business Impact
 - Bullet points:
-- Visual/Chart: [JSON dataset for cost-benefit metrics]
+[NATIVE_CHART: pie, { "labels": ["Cost", "Profit"], "datasets": [40, 60] }]
 ---
 Slide 7: Next Steps & Partnership
+[THEME: ENTERPRISE_DARK]
 [LAYOUT: TITLE_SLIDE]
+[CONTENT]:
 - Title: Let's Build Together
 - Subtitle: Proposed Next Steps
-- Visual: [Handshake or partnership visual description]`;
+[VISUAL_PROMPT]: Handshake or partnership visual description`;
     } else if (baseTemplate === 'enterprise' && outputType === 'BRD') {
       templateText = `Document Title: BRD — \${projectName}
 Project Name: \${projectName}
@@ -1173,40 +1243,52 @@ Reviewer Name | Role | Status (Approved / Pending / Rejected) | Date | Comments
 [Name] | [Role] | Pending | |`;
       } else if (outputType === 'PRESENTATION') {
         templateText = `Slide 1: Title
+[THEME: DEFAULT_LIGHT]
 [LAYOUT: TITLE_SLIDE]
+[CONTENT]:
 - Title: \${projectName}
 - Subtitle: Project Presentation
-- Visual: [Cover image description]
+[VISUAL_PROMPT]: Cover image description
 ---
 Slide 2: Overview
+[THEME: DEFAULT_LIGHT]
 [LAYOUT: STANDARD_CONTENT]
+[CONTENT]:
 - Title: Executive Overview
 - Bullet points:
-- Visual/Chart: [Overview graphic description]
+[VISUAL_PROMPT]: Overview graphic description
 ---
 Slide 3: Problem Statement
-[LAYOUT: TWO_COLUMN_SPLIT]
+[THEME: DEFAULT_LIGHT]
+[LAYOUT: SPLIT_TWO_COLUMN]
+[CONTENT]:
 - Title: The Problem
 - Bullet points:
-- Visual/Chart: [Problem visual description]
+[NATIVE_CHART: bar, { "labels": ["Metric A", "Metric B"], "datasets": [10, 20] }]
 ---
 Slide 4: Solution
+[THEME: DEFAULT_LIGHT]
 [LAYOUT: STANDARD_CONTENT]
+[CONTENT]:
 - Title: Proposed Solution
 - Bullet points:
-- Visual/Chart: [Solution visual description]
+[VISUAL_PROMPT]: Solution visual description
 ---
 Slide 5: Timeline & Roadmap
-[LAYOUT: FULL_WIDTH_VISUAL]
+[THEME: DEFAULT_LIGHT]
+[LAYOUT: HERO_IMAGE]
+[CONTENT]:
 - Title: Project Timeline
 - Bullet points:
-- Visual/Chart: [Milestone table or timeline description]
+[VISUAL_PROMPT]: Milestone table or timeline description
 ---
 Slide 6: Conclusion
+[THEME: DEFAULT_LIGHT]
 [LAYOUT: TITLE_SLIDE]
+[CONTENT]:
 - Title: Conclusion & Next Steps
 - Subtitle:
-- Visual: [Closing image description]`;
+[VISUAL_PROMPT]: Closing image description`;
       } else {
         templateText = `Document Title: ${outputType} — \${projectName}
 Project Name: \${projectName}
@@ -1379,7 +1461,7 @@ ${middleSample}`;
           what the original approved state was, who requested the
           change, why it is needed, and what the impact is.
           This summary will anchor a CRD.`,
-        PRESENTATION: `Focus your summary on: executive summary overview, core pain points, solution capabilities, and key milestone schedules suitable for a partnership pitch deck.`
+        PRESENTATION: `Focus your summary on: executive summary overview, core pain points, solution capabilities, key milestone schedules suitable for a partnership pitch deck, and search for data relationships that can be visualized as charts or graphs.`
       };
 
       const summaryFocus = summaryFocusByType[outputType] || summaryFocusByType.BRD;
@@ -1554,6 +1636,10 @@ IDs, likelihood ratings, impact levels, and mitigation strategies. Do not merge 
 SECTION RULE: This is a financial section. Preserve all figures,
 currencies, percentages, and ROI calculations exactly as written.`;
         }
+        if (outputType === 'PRESENTATION') {
+          return `
+SECTION RULE: This is a presentation slide. Act as a Visual Reducer. Ensure strict adherence to the Slide structure tags ([THEME], [LAYOUT], [CONTENT], [NATIVE_CHART], [VISUAL_PROMPT], [SPEAKER_NOTES]). ABSOLUTELY NO MARKDOWN.`;
+        }
         return '';
       };
 
@@ -1610,6 +1696,15 @@ CRD-SPECIFIC RULES:
 - Preserve all impact assessment values (High/Medium/Low ratings) exactly.
 - Do not remove option analysis rows — even rejected options must remain.
 - Preserve all stakeholder consultation records and CCB decision fields.`,
+
+          PRESENTATION: `
+PRESENTATION-SPECIFIC RULES (VISUAL REDUCER):
+- Rule 1: Aggressive Brevity. Convert all paragraphs into maximum 3-bullet lists. No bullet may exceed 12 words. Use active, consulting-style action verbs (e.g., "Optimize," "Accelerate," "Eliminate").
+- Rule 2: Tag Preservation (CRITICAL). You must NEVER delete, modify, or translate any bracketed tags. Tags like [THEME: ...], [LAYOUT: ...], [NATIVE_CHART: ...], [VISUAL_PROMPT: ...], and [SPEAKER_NOTES: ...] must remain exactly as they were in the input context.
+- Rule 3: JSON Integrity. Ensure that any JSON datasets inside the [NATIVE_CHART] blocks are strictly validated and not truncated.
+- Rule 4: Prompt Enhancement. If a [VISUAL_PROMPT] is weak, enhance it into a rich Midjourney/Flux style prompt (e.g., change "Show a server" to "[VISUAL_PROMPT: Isometric 3D render of a glowing server rack, cyber-security theme, neon blue and gold lighting, ultra-detailed, 8k]").
+- ABSOLUTELY NO MARKDOWN. Do not bold, italicize, or use markdown headers in the output.
+- Do not add "Title:", "Subtitle:", or "Content:" labels.`,
         };
 
         const sectionRules = getSectionPolishRules(sectionHeader);
@@ -1746,45 +1841,3 @@ export async function generatePdf(data: GeneratedData): Promise<Blob> {
   return await executeWorker('GENERATE_PDF', { data });
 }
 
-export async function generatePptx(data: GeneratedData): Promise<Blob> {
-  const pres = new pptxgen();
-  pres.title = data.projectName || "Presentation";
-
-  // Simple title slide
-  const coverSlide = pres.addSlide();
-  coverSlide.addText(`${data.outputType} Document`, { x: 0.5, y: 1.5, w: '90%', h: 1, fontSize: 36, bold: true, align: 'center' });
-  coverSlide.addText(data.projectName || "Project", { x: 0.5, y: 2.5, w: '90%', h: 1, fontSize: 24, align: 'center' });
-
-  // Map each section to a slide
-  for (const section of data.sections || []) {
-    const slide = pres.addSlide();
-    slide.addText(section.header.replace(/^#+\s*/, ''), { x: 0.5, y: 0.5, w: '90%', h: 0.8, fontSize: 24, bold: true });
-    
-    // Split section content into lines
-    const lines = section.content.split('\n').filter((l: string) => l.trim().length > 0 && !l.startsWith('```'));
-    
-    let yPos = 1.5;
-    for (const line of lines.slice(0, 10)) { // limit lines to avoid overflowing slide
-      let text = line.replace(/[*_~`]/g, '').trim();
-      let isBullet = false;
-      if (text.startsWith('- ') || text.startsWith('* ')) {
-        isBullet = true;
-        text = text.substring(2);
-      } else if (text.startsWith('### ') || text.startsWith('## ') || text.startsWith('# ')) {
-        text = text.replace(/^#+\s*/, '');
-      }
-      
-      slide.addText(text, { 
-        x: isBullet ? 1 : 0.5, 
-        y: yPos, 
-        w: '90%', 
-        h: 0.5, 
-        fontSize: isBullet ? 14 : 16, 
-        bullet: isBullet 
-      });
-      yPos += 0.4;
-    }
-  }
-
-  return (await pres.write({ outputType: 'blob' })) as unknown as Blob;
-}

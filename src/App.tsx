@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { Moon, Sun, Settings2, FileText, UploadCloud, CheckCircle2, FileUp, X, StopCircle, Download } from 'lucide-react';
 import { checkConnection } from './lib/llm';
-import { runPreProcessing, runFinalGeneration, generateDocx, generatePdf, generatePptx, type GeneratedData, type GenerationResult } from './lib/processor';
+import { runPreProcessing, runFinalGeneration, generateDocx, generatePdf, type GeneratedData, type GenerationResult } from './lib/processor';
+import { buildPresentation } from './lib/presentationBuilder';
 import { useAppStore } from './store/useAppStore';
 import './index.css';
 
@@ -28,7 +29,9 @@ function App() {
     baseTemplate, setBaseTemplate,
     templateFile, setTemplateFile,
     processingMode, setProcessingMode,
-    creatorName, setCreatorName
+    creatorName, setCreatorName,
+    webSearchEnabled, setWebSearchEnabled,
+    mcpServerUrl, setMcpServerUrl
   } = useAppStore();
 
   const [showConnection, setShowConnection] = useState(false);
@@ -162,7 +165,10 @@ function App() {
         if (extValid && locValid) {
           setConnectionStatus('connected');
           setConnectionMessage('Connected (External + Fallback Ready)');
-        } else if (!extValid && locValid) {
+        } else if (extValid) {
+          setConnectionStatus('connected');
+          setConnectionMessage(`Connected to ${getProviderName()}`);
+        } else if (locValid) {
           setConnectionStatus('connected');
           setConnectionMessage('Connected (Local Only)');
         } else {
@@ -210,7 +216,8 @@ function App() {
       } else if (format === 'pdf') {
         blob = await generatePdf(data);
       } else {
-        blob = await generatePptx(data);
+        const compiledText = data.sections.map(s => s.header + '\n' + s.content).join('\n---\n');
+        blob = await buildPresentation(compiledText, data.projectName);
       }
 
       const url = window.URL.createObjectURL(blob);
@@ -266,7 +273,9 @@ function App() {
         outputType,
         llmConfig,
         onProgress,
-        signal
+        signal,
+        webSearchEnabled,
+        mcpServerUrl
       });
 
       setCompiledContext(context);
@@ -498,6 +507,35 @@ function App() {
                   />
                 </div>
               )}
+              
+              <div className="input-group" style={{ minWidth: '100%', marginTop: '1rem', borderTop: '1px solid var(--color-border)', paddingTop: '1rem' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={webSearchEnabled}
+                    onChange={(e) => setWebSearchEnabled(e.target.checked)}
+                  /> Enable AI Deep Web Research
+                </label>
+                {webSearchEnabled && (
+                  <div style={{ marginTop: '0.5rem', marginLeft: '1.5rem' }}>
+                    <label className="input-label" style={{ display: 'block', marginBottom: '0.25rem' }}>
+                      MCP Server URL
+                      <small style={{ display: 'block', color: 'var(--color-text-muted)', fontWeight: 'normal', marginTop: '0.125rem' }}>
+                        Connects to your local web-search-mcp-main server node
+                      </small>
+                    </label>
+                    <input
+                      type="text"
+                      className="input-field"
+                      value={mcpServerUrl}
+                      onChange={e => setMcpServerUrl(e.target.value)}
+                      placeholder="http://localhost:3000"
+                      style={{ maxWidth: '300px' }}
+                    />
+                  </div>
+                )}
+              </div>
+
               <button
                 className={`btn mb-4 ${connectionStatus === 'connected' ? 'bg-green-600 text-white hover:bg-green-700 border-green-600' : 'btn-outline'}`}
                 style={connectionStatus === 'connected' ? { backgroundColor: 'var(--color-success, #10b981)', color: '#fff', borderColor: 'var(--color-success, #10b981)' } : {}}
@@ -792,7 +830,7 @@ function App() {
                     checked={applyPolish}
                     onChange={(e) => setApplyPolish(e.target.checked)}
                     disabled={isProcessing}
-                  /> Apply Final Editorial Polish (Removes AI filler, tightens requirements, ensures consistency)
+                  /> {outputType === 'PRESENTATION' ? 'Apply Visual Reducer (Strips filler, tightens bullets, verifies [NATIVE_CHART] bindings)' : 'Apply Final Editorial Polish (Removes AI filler, tightens requirements, ensures consistency)'}
                 </label>
               </div>
             </div>
