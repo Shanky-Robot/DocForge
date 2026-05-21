@@ -1,10 +1,22 @@
-import { extractText, createVectorDB, chunkText } from './rag';
+import { extractText, createVectorDB, chunkText, type VectorDB } from './rag';
 import { insertMultiple, search } from '@orama/orama';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType, BorderStyle, Header, Footer, AlignmentType, PageBreak, PageNumber, TabStopType } from 'docx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
-let vectorDbInstance: any = null;
+let vectorDbInstance: VectorDB | null = null;
+
+interface DocDataSection {
+  header: string;
+  content: string;
+}
+
+interface DocData {
+  outputType: string;
+  projectName?: string;
+  creatorName?: string;
+  sections: DocDataSection[];
+}
 
 self.onmessage = async (e: MessageEvent) => {
   const { type, payload, id } = e.data;
@@ -36,12 +48,10 @@ self.onmessage = async (e: MessageEvent) => {
       const blob = await generatePdfWorker(payload.data);
       self.postMessage({ type: 'SUCCESS', id, payload: blob });
     }
-  } catch (err: any) {
-    self.postMessage({ type: 'ERROR', id, payload: err.message });
+  } catch (err: unknown) {
+    self.postMessage({ type: 'ERROR', id, payload: err instanceof Error ? err.message : String(err) });
   }
 };
-
-// --- Helper Functions Moved to Worker ---
 
 function sanitizeLatex(text: string): string {
   return text
@@ -91,10 +101,6 @@ function parseInlineToDocxTextRuns(text: string): TextRun[] {
   return runs;
 }
 
-// --- Table & Heading Helpers ---
-
-// Removed parseMarkdownTable to fix unused variable error
-
 function getHeadingLevel(header: string, outputType: string): 1 | 2 | 3 {
   if (/^\d+\.\d+/.test(header) || header.startsWith('###')) return 3;
   if (/^\d+\./.test(header)) return 2;
@@ -102,13 +108,9 @@ function getHeadingLevel(header: string, outputType: string): 1 | 2 | 3 {
   return 2;
 }
 
-async function generateDocxWorker(data: any): Promise<Blob> {
+async function generateDocxWorker(data: DocData): Promise<Blob> {
   const docChildren: any[] = [];
-
-  // FIX 11.2 — Cover page
-  const coverDate = new Date().toLocaleDateString('en-US', {
-    year: 'numeric', month: 'long', day: 'numeric'
-  });
+  const coverDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
   docChildren.push(new Paragraph({
     children: [new TextRun({ text: `${data.outputType} Document`, bold: true, size: 48 })],
@@ -161,12 +163,11 @@ async function generateDocxWorker(data: any): Promise<Blob> {
   }));
   docChildren.push(new Paragraph({ children: [new PageBreak()] }));
 
-  // FIX 11.3 — Table of Contents
   docChildren.push(new Paragraph({
     children: [new TextRun({ text: 'Table of Contents', bold: true, size: 36 })],
     spacing: { after: 240 },
   }));
-  const tocEntries = (data.sections || []).map((sec: any, i: number) => ({
+  const tocEntries = (data.sections || []).map((sec, i) => ({
     title: sec.header.replace(/^#+\s*/, ''),
     pageRef: i + 3,
   }));
@@ -184,7 +185,6 @@ async function generateDocxWorker(data: any): Promise<Blob> {
   docChildren.push(new Paragraph({ children: [new PageBreak()] }));
 
   for (const section of data.sections) {
-    // FIX 11.5 — Section heading hierarchy
     const hLevel = getHeadingLevel(section.header.replace(/^#+\s*/, ''), data.outputType);
     const headingLevel = hLevel === 1 ? HeadingLevel.HEADING_1 : hLevel === 2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_3;
     const headingSize = hLevel === 1 ? 48 : hLevel === 2 ? 32 : 26;
@@ -262,7 +262,7 @@ async function generateDocxWorker(data: any): Promise<Blob> {
         if (line.match(/^[|-\s:]+$/)) continue;
         
         const rowContent = line.replace(/^\|/, '').replace(/\|$/, '');
-        let cells = rowContent.split('|').map((c: string) => c.trim());
+        const cells = rowContent.split('|').map((c: string) => c.trim());
         if (cells.length > 0 && cells[cells.length - 1] === '') cells.pop();
         if (cells.length > 0 && cells[0] === '') cells.shift();
         
@@ -290,13 +290,7 @@ async function generateDocxWorker(data: any): Promise<Blob> {
           heading: HeadingLevel.HEADING_1,
           spacing: { before: 300, after: 120 }
         }));
-      } else if (line.startsWith('* ')) {
-        docChildren.push(new Paragraph({
-          children: parseInlineToDocxTextRuns(line.substring(2)),
-          bullet: { level: 0 },
-          spacing: { after: 100 }
-        }));
-      } else if (line.startsWith('- ')) {
+      } else if (line.startsWith('* ') || line.startsWith('- ')) {
         docChildren.push(new Paragraph({
           children: parseInlineToDocxTextRuns(line.substring(2)),
           bullet: { level: 0 },
@@ -313,7 +307,6 @@ async function generateDocxWorker(data: any): Promise<Blob> {
     if (inTable) finishTable();
   }
 
-  // FIX 11.4 — Headers and footers
   const doc = new Document({
     sections: [{
       properties: {},
@@ -357,7 +350,7 @@ async function generateDocxWorker(data: any): Promise<Blob> {
   return await Packer.toBlob(doc);
 }
 
-function renderPdfRichText(doc: jsPDF, text: string, startX: number, startY: number, maxWidth: number, isList: boolean = false): number {
+function renderPdfRichText(doc: jsPDF, text: string, startX: number, startY: number, maxWidth: number, isList = false): number {
   let x = startX;
   let y = startY;
   
@@ -419,13 +412,9 @@ function renderPdfRichText(doc: jsPDF, text: string, startX: number, startY: num
   return y;
 }
 
-async function generatePdfWorker(data: any): Promise<Blob> {
+async function generatePdfWorker(data: DocData): Promise<Blob> {
   const doc = new jsPDF();
-
-  // FIX 11.2 — Cover page
-  const coverDate = new Date().toLocaleDateString('en-US', {
-    year: 'numeric', month: 'long', day: 'numeric'
-  });
+  const coverDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
   doc.setFontSize(28);
   doc.setFont('helvetica', 'bold');
@@ -455,14 +444,13 @@ async function generatePdfWorker(data: any): Promise<Blob> {
   doc.text('CONFIDENTIAL — For internal use only', 105, 272, { align: 'center' });
   doc.setTextColor(0, 0, 0);
 
-  // FIX 11.3 — Table of Contents
   doc.addPage();
   let y = 25;
   doc.setFontSize(18);
   doc.setFont('helvetica', 'bold');
   doc.text('Table of Contents', 20, y);
   y += 12;
-  const tocEntries = (data.sections || []).map((sec: any, i: number) => ({
+  const tocEntries = (data.sections || []).map((sec, i) => ({
     title: sec.header.replace(/^#+\s*/, ''),
     pageRef: i + 3,
   }));
@@ -484,17 +472,12 @@ async function generatePdfWorker(data: any): Promise<Blob> {
     y += 7;
   }
 
-  // Content pages
   doc.addPage();
   y = 25;
   
   for (const section of data.sections) {
-    if (y > 265) {
-      doc.addPage();
-      y = 25;
-    }
+    if (y > 265) { doc.addPage(); y = 25; }
 
-    // FIX 11.5 — Section heading hierarchy
     const hLevel = getHeadingLevel(section.header.replace(/^#+\s*/, ''), data.outputType);
     const headingFontSize = hLevel === 1 ? 24 : hLevel === 2 ? 16 : 13;
     doc.setFontSize(headingFontSize);
@@ -521,6 +504,7 @@ async function generatePdfWorker(data: any): Promise<Blob> {
             headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold' },
             theme: 'grid'
           });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           y = (doc as any).lastAutoTable.finalY + 10;
         }
         tableRows = [];
@@ -538,10 +522,7 @@ async function generatePdfWorker(data: any): Promise<Blob> {
       }
 
       if (inCodeBlock) {
-        if (y > 265) {
-          doc.addPage();
-          y = 25;
-        }
+        if (y > 265) { doc.addPage(); y = 25; }
         doc.setFillColor(245, 245, 245);
         doc.rect(15, y - 4, 180, 6, 'F');
         doc.setFont("courier", "normal");
@@ -565,7 +546,7 @@ async function generatePdfWorker(data: any): Promise<Blob> {
         if (line.match(/^[|-\s:]+$/)) continue;
         
         const rowContent = line.replace(/^\|/, '').replace(/\|$/, '');
-        let cells = rowContent.split('|').map((c: string) => c.trim());
+        const cells = rowContent.split('|').map((c: string) => c.trim());
         if (cells.length > 0 && cells[cells.length - 1] === '') cells.pop();
         if (cells.length > 0 && cells[0] === '') cells.shift();
         
@@ -575,10 +556,7 @@ async function generatePdfWorker(data: any): Promise<Blob> {
         if (inTable) finishTablePdf();
       }
       
-      if (y > 265) {
-        doc.addPage();
-        y = 25;
-      }
+      if (y > 265) { doc.addPage(); y = 25; }
 
       if (line.startsWith('### ')) {
         doc.setFontSize(14);
@@ -595,11 +573,7 @@ async function generatePdfWorker(data: any): Promise<Blob> {
         doc.setFont("helvetica", "bold");
         y = renderPdfRichText(doc, line.substring(2), 20, y, 170);
         y += 10;
-      } else if (line.startsWith('* ')) {
-        doc.setFontSize(12);
-        y = renderPdfRichText(doc, line.substring(2), 20, y, 164, true);
-        y += 6;
-      } else if (line.startsWith('- ')) {
+      } else if (line.startsWith('* ') || line.startsWith('- ')) {
         doc.setFontSize(12);
         y = renderPdfRichText(doc, line.substring(2), 20, y, 164, true);
         y += 6;
@@ -614,7 +588,7 @@ async function generatePdfWorker(data: any): Promise<Blob> {
     y += 10;
   }
 
-  // FIX 11.4 — Add headers and footers to all pages except the cover (page 1)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pageCount = (doc.internal as any).getNumberOfPages();
   for (let p = 2; p <= pageCount; p++) {
     doc.setPage(p);
@@ -622,11 +596,9 @@ async function generatePdfWorker(data: any): Promise<Blob> {
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(100, 100, 100);
     doc.setLineWidth(0.3);
-    // Header
     doc.text(`${data.outputType} — ${data.projectName}`, 20, 10);
     doc.text('v1.0 | Draft', 190, 10, { align: 'right' });
     doc.line(20, 13, 190, 13);
-    // Footer
     doc.line(20, 284, 190, 284);
     doc.text('CONFIDENTIAL', 20, 289);
     doc.text(`Page ${p - 1} of ${pageCount - 1}`, 105, 289, { align: 'center' });

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Moon, Sun, Settings2, FileText, UploadCloud, CheckCircle2, FileUp, X, StopCircle, Download } from 'lucide-react';
-import { checkConnection } from './lib/llm';
-import { runPreProcessing, runFinalGeneration, generateDocx, generatePdf, type GeneratedData, type GenerationResult } from './lib/processor';
+import { checkConnection, type LLMConfig } from './lib/llm';
+import { runPreProcessing, runFinalGeneration, generateDocx, generatePdf, type GeneratedData, type GenerationResult, type ProcessCallback } from './lib/processor';
 import { buildPresentation } from './lib/presentationBuilder';
 import { useAppStore } from './store/useAppStore';
 import './index.css';
@@ -291,11 +291,11 @@ function App() {
 
       await resumeFinalGeneration(context, signal, llmConfig, onProgress);
 
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
         setStatusText('Processing Halted by User');
       } else {
-        setErrorText(err.message || 'An unknown error occurred.');
+        setErrorText(err instanceof Error ? err.message : 'An unknown error occurred.');
       }
       setIsProcessing(false);
     }
@@ -304,8 +304,8 @@ function App() {
   const resumeFinalGeneration = async (
     contextOverride?: string,
     signalOverride?: AbortSignal,
-    existingLlmConfig?: any,
-    existingOnProgress?: any
+    existingLlmConfig?: LLMConfig,
+    existingOnProgress?: ProcessCallback
   ) => {
     const context = contextOverride || compiledContext;
     if (!context) return;
@@ -361,11 +361,11 @@ function App() {
       } else {
         setErrorText(result.message || 'An unknown error occurred.');
       }
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
         setStatusText('Processing Halted by User');
       } else {
-        setErrorText(err.message || 'An unknown error occurred.');
+        setErrorText(err instanceof Error ? err.message : 'An unknown error occurred.');
       }
     } finally {
       setIsProcessing(false);
@@ -660,7 +660,7 @@ function App() {
                     name="outputType"
                     value={type.id}
                     checked={outputType === type.id}
-                    onChange={() => setOutputType(type.id)}
+                    onChange={() => setOutputType(type.id as any)}
                   />
                   <div className="radio-card-content">
                     <span className="radio-card-title">{type.title}</span>

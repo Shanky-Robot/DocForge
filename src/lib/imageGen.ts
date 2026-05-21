@@ -1,4 +1,4 @@
-export async function fetchAiImage(prompt: string, timeoutMs: number = 15000): Promise<string | null> {
+export async function fetchAiImage(prompt: string, timeoutMs = 15000): Promise<string | null> {
   const encodedPrompt = encodeURIComponent(prompt);
   const url = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=800&height=600&nologo=true`;
 
@@ -13,22 +13,16 @@ export async function fetchAiImage(prompt: string, timeoutMs: number = 15000): P
     }
 
     const blob = await response.blob();
-    return new Promise((resolve) => {
+    return await new Promise<string | null>((resolve) => {
       const reader = new FileReader();
-      reader.onloadend = () => {
-        if (typeof reader.result === 'string') {
-          resolve(reader.result);
-        } else {
-          resolve(null);
-        }
-      };
+      reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : null);
       reader.onerror = () => {
         console.warn('Failed to convert Blob to Base64');
         resolve(null);
       };
       reader.readAsDataURL(blob);
     });
-  } catch (error) {
+  } catch (error: unknown) {
     if (error instanceof Error && error.name === 'AbortError') {
       console.warn(`Image generation timed out after ${timeoutMs}ms for prompt: ${prompt}`);
     } else {

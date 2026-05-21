@@ -17,7 +17,7 @@ export type ProcessCallback = (progress: number, status: string) => void;
 
 const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
 
-const executeWorker = (type: string, payload: any): Promise<any> => {
+const executeWorker = (type: string, payload: unknown): Promise<unknown> => {
   return new Promise((resolve, reject) => {
     const id = Math.random().toString(36).substring(7);
     const handler = (e: MessageEvent) => {
@@ -82,7 +82,7 @@ export async function runPreProcessing({ files, outputType, llmConfig, onProgres
 
     const focusInstruction = extractionFocus[outputType] || extractionFocus.BRD;
 
-    if (rawText.length <= MAX_CHUNK_SIZE) {
+    if ((rawText as string).length <= MAX_CHUNK_SIZE) {
       const prompt = `Analyze this source file and extract highly detailed,
       structured notes for use in generating a ${outputType} document.
 
@@ -106,7 +106,7 @@ export async function runPreProcessing({ files, outputType, llmConfig, onProgres
       
       compiledContext += `## Deep Analysis: ${file.name}\n\n${aiNotes}\n\n`;
     } else {
-      const chunks = chunkText(rawText, file.name, MAX_CHUNK_SIZE, 500);
+      const chunks = chunkText(rawText as string, file.name, MAX_CHUNK_SIZE, 500);
       let fileNotes = '';
       
       for (let j = 0; j < chunks.length; j++) {
@@ -312,7 +312,7 @@ DOCUMENT-TYPE-SPECIFIC LANGUAGE RULES:
     onProgress(40, 'Stage 2: Selecting and parsing template...');
 
     if (baseTemplate === 'custom' && templateFile) {
-      templateText = await executeWorker('EXTRACT_TEXT', { file: templateFile });
+      templateText = await executeWorker('EXTRACT_TEXT', { file: templateFile }) as string;
     } else if (baseTemplate === 'enterprise' && outputType === 'PRESENTATION') {
       templateText = `Slide 1: Title Slide
 [THEME: ENTERPRISE_DARK]
@@ -1577,11 +1577,11 @@ INSTRUCTIONS:
         );
         
         sections.push({ header: headerTitle, content: cleanContent });
-        } catch (sectionError: any) {
-          if (sectionError.name === 'AbortError') throw sectionError;
+        } catch (sectionError: unknown) {
+          if (sectionError instanceof Error && sectionError.name === 'AbortError') throw sectionError;
           sections.push({
             header: headerTitle,
-            content: `[GENERATION ERROR: This section could not be generated. Error: ${sectionError.message}. Please re-run generation or fill this section manually.]`
+            content: `[GENERATION ERROR: This section could not be generated. Error: ${sectionError instanceof Error ? sectionError.message : String(sectionError)}. Please re-run generation or fill this section manually.]`
           });
         }
       }
@@ -1817,27 +1817,31 @@ ${sectionRules}`;
     // ---------------------------------------------------------
     onProgress(100, 'Done! Content Generated.');
     return { success: true, data: { projectName, creatorName, outputType, sections } };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error(error);
     let reason: Extract<GenerationResult, { success: false }>['reason'] = 'api-error';
-    if (error.name === 'AbortError') reason = 'aborted';
-    else if (error.message.includes('too large')) reason = 'context-too-large';
-    else if (error.message.includes('template')) reason = 'template-error';
-    onProgress(100, `Error: ${error.message}`);
+    if (error instanceof Error) {
+        if (error.name === 'AbortError') reason = 'aborted';
+        else if (error.message.includes('too large')) reason = 'context-too-large';
+        else if (error.message.includes('template')) reason = 'template-error';
+        onProgress(100, `Error: ${error.message}`);
+    } else {
+        onProgress(100, `Error: ${String(error)}`);
+    }
     return {
       success: false,
       reason,
-      message: error.message,
+      message: error instanceof Error ? error.message : String(error),
       partialSections: sections.length > 0 ? sections : undefined
     };
   }
 }
 
 export async function generateDocx(data: GeneratedData): Promise<Blob> {
-  return await executeWorker('GENERATE_DOCX', { data });
+  return await executeWorker('GENERATE_DOCX', { data }) as Blob;
 }
 
 export async function generatePdf(data: GeneratedData): Promise<Blob> {
-  return await executeWorker('GENERATE_PDF', { data });
+  return await executeWorker('GENERATE_PDF', { data }) as Blob;
 }
 

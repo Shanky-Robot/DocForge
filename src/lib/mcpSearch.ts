@@ -2,13 +2,8 @@ export async function executeMcpSearch(query: string, mcpUrl: string): Promise<s
   try {
     const response = await fetch(`${mcpUrl.replace(/\/$/, '')}/tools/call`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        name: 'web-search',
-        arguments: { query }
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'web-search', arguments: { query } })
     });
 
     if (!response.ok) {
@@ -18,8 +13,10 @@ export async function executeMcpSearch(query: string, mcpUrl: string): Promise<s
 
     const data = await response.json();
     
-    if (data && data.content && Array.isArray(data.content)) {
-      return data.content.map((c: any) => c.text || JSON.stringify(c)).join('\n\n');
+    if (data?.content && Array.isArray(data.content)) {
+      return data.content
+        .map((c: { text?: string }) => c.text || JSON.stringify(c))
+        .join('\n\n');
     }
 
     return JSON.stringify(data);
